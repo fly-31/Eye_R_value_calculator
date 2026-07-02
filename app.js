@@ -61,6 +61,7 @@ const I18N = {
     colPatient: "Patient",
     colEye: "Eye",
     avgHeading: "Average of Left & Right eye",
+    normHeading: "Divided by Vertical 0.75Hz (Left + Right sum)",
     dirHorizontal: "Horizontal",
     dirVertical: "Vertical",
     statusProcessing: "Processing…",
@@ -107,6 +108,7 @@ const I18N = {
     colPatient: "환자",
     colEye: "눈",
     avgHeading: "좌·우안 평균",
+    normHeading: "수직 0.75Hz(좌+우 합)로 나눈 값",
     dirHorizontal: "수평",
     dirVertical: "수직",
     statusProcessing: "처리 중…",
@@ -437,7 +439,33 @@ function buildTable(results) {
     return { patient, values };
   });
 
-  return { columns, redColumns, patients, rows, averageRows };
+  // Normalized: each value / combined (LH+RH sum) Vertical 0.75Hz of the SAME
+  // type (B columns use 'Vertical 0.75Hz B', R columns use 'Vertical 0.75Hz R').
+  const typeOf = {};
+  for (const c of ordered) typeOf[c.label] = c.type;
+  const normalizedRows = [];
+  for (const patient of patients) {
+    const denom = {};
+    for (const type of ["B", "R"]) {
+      const dl = `Vertical 0.75Hz ${type}`;
+      const lh = (cells.get(`${patient}||LH`) || {})[dl];
+      const rh = (cells.get(`${patient}||RH`) || {})[dl];
+      const total = (Number.isFinite(lh) ? lh : NaN) + (Number.isFinite(rh) ? rh : NaN);
+      denom[type] = Number.isFinite(total) && total !== 0 ? total : NaN;
+    }
+    for (const eye of EYES) {
+      const src = cells.get(`${patient}||${eye}`) || {};
+      const values = {};
+      for (const label of columns) {
+        const v = src[label];
+        const d = denom[typeOf[label]];
+        values[label] = Number.isFinite(v) && Number.isFinite(d) ? v / d : NaN;
+      }
+      normalizedRows.push({ patient, eye, values });
+    }
+  }
+
+  return { columns, redColumns, patients, rows, averageRows, normalizedRows };
 }
 
 // ---------------------------------------------------------------------------
@@ -479,21 +507,21 @@ async function toExcelBlob(table) {
     for (let i = 3; i <= headers.length; i++) r.getCell(i).numFmt = EXCEL_NUM_FMT;
   }
 
-  // --- Average (Left + Right) section, below the original table ---
+  // --- Normalized section (÷ combined Vertical 0.75Hz), below the original ---
   ws.addRow([]);
-  const titleRow = ws.addRow(["Average (Left + Right)"]);
+  const titleRow = ws.addRow(["Divided by Vertical 0.75Hz (Left + Right sum)"]);
   titleRow.getCell(1).font = { bold: true };
-  const avgHeaderNames = ["Patient", "", ...table.columns];
-  const avgHeaderRow = ws.addRow(avgHeaderNames);
-  avgHeaderNames.forEach((name, i) => {
-    const cell = avgHeaderRow.getCell(i + 1);
+  const normHeaderNames = ["Patient", "Eye", ...table.columns];
+  const normHeaderRow = ws.addRow(normHeaderNames);
+  normHeaderNames.forEach((name, i) => {
+    const cell = normHeaderRow.getCell(i + 1);
     const isRed = table.redColumns.includes(name);
     cell.font = { bold: true, color: { argb: isRed ? "FFFF0000" : "FF000000" } };
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF2F2F2" } };
     cell.alignment = { horizontal: "center" };
   });
-  for (const row of table.averageRows) {
-    const values = [row.patient, ""];
+  for (const row of table.normalizedRows) {
+    const values = [row.patient, row.eye];
     for (const label of table.columns) values.push(roundR(row.values[label]));
     const r = ws.addRow(values);
     for (let i = 3; i <= headers.length; i++) r.getCell(i).numFmt = EXCEL_NUM_FMT;
@@ -519,11 +547,8 @@ let lastTable = null;
 let lastWarnings = [];
 let statusState = null; // {type:'processing'} | {type:'processed', n, p} | {type:'noValid'}
 
-function renderTable(table) {
-  if (!table) {
-    els.results.innerHTML = "";
-    return;
-  }
+/** Build HTML for a Patient/Eye table (original or normalized). */
+function eyeTableHtml(table, dataRows) {
   const headers = [t("colPatient"), t("colEye"), ...table.columns.map(categoryLabelDisplay)];
   const redSet = new Set(table.redColumns.map(categoryLabelDisplay));
   let html = "<table><thead><tr>";
@@ -532,17 +557,29 @@ function renderTable(table) {
     html += `<th${red}>${h}</th>`;
   }
   html += "</tr></thead><tbody>";
-  for (const row of table.rows) {
-    html += "<tr>";
-    html += `<td class="patient">${row.patient}</td><td>${row.eye}</td>`;
+  for (const row of dataRows) {
+    html += `<tr><td class="patient">${row.patient}</td><td>${row.eye}</td>`;
     for (const label of table.columns) {
       const red = table.redColumns.includes(label) ? ' class="red"' : "";
       html += `<td${red}>${fmt(row.values[label])}</td>`;
     }
     html += "</tr>";
   }
-  html += "</tbody></table>";
-  els.results.innerHTML = html;
+  return html + "</tbody></table>";
+}
+
+function renderTable(table) {
+  els.results.innerHTML = table ? eyeTableHtml(table, table.rows) : "";
+}
+
+function renderNormalizedTable(table) {
+  if (!table || !table.normalizedRows.length) {
+    els.normResults.innerHTML = "";
+    els.normHeading.style.display = "none";
+    return;
+  }
+  els.normHeading.style.display = "block";
+  els.normResults.innerHTML = eyeTableHtml(table, table.normalizedRows);
 }
 
 function renderAverageTable(table) {
@@ -610,7 +647,7 @@ async function handleFiles(fileList) {
     setStatus({ type: "noValid" });
     lastTable = null;
     renderTable(null);
-    renderAverageTable(null);
+    renderNormalizedTable(null);
     els.download.disabled = true;
     els.redNote.style.display = "none";
     return;
@@ -620,7 +657,7 @@ async function handleFiles(fileList) {
   lastTable = table;
   setStatus({ type: "processed", n: results.length, p: table.patients.length });
   renderTable(table);
-  renderAverageTable(table);
+  renderNormalizedTable(table);
   els.download.disabled = false;
   els.redNote.style.display = table.redColumns.length ? "block" : "none";
 }
@@ -661,7 +698,7 @@ function applyTranslations() {
   renderStatus();
   renderWarnings(lastWarnings);
   renderTable(lastTable);
-  renderAverageTable(lastTable);
+  renderNormalizedTable(lastTable);
 }
 
 function setLang(lang) {
@@ -677,8 +714,8 @@ window.addEventListener("DOMContentLoaded", () => {
   els.status = document.getElementById("status");
   els.download = document.getElementById("downloadBtn");
   els.redNote = document.getElementById("redNote");
-  els.avgHeading = document.getElementById("avgHeading");
-  els.avgResults = document.getElementById("avgResults");
+  els.normHeading = document.getElementById("normHeading");
+  els.normResults = document.getElementById("normResults");
   els.langToggle = document.getElementById("langToggle");
 
   applyTranslations();

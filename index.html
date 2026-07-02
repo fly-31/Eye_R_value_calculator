@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Eye Movement R² Calculator</title>
   <!-- Bump ?v= on each deploy so browsers fetch the new file instead of a cached copy. -->
-  <link rel="stylesheet" href="styles.css?v=3" />
+  <link rel="stylesheet" href="styles.css?v=4" />
 </head>
 <body>
   <button id="langToggle" class="lang-toggle" type="button">한국어</button>
@@ -64,10 +64,10 @@
 
     <div id="results" class="results"></div>
 
-    <h2 id="avgHeading" class="avg-heading" style="display:none" data-i18n="avgHeading">
-      Average of Left &amp; Right eye
+    <h2 id="normHeading" class="avg-heading" style="display:none" data-i18n="normHeading">
+      Divided by Vertical 0.75Hz (Left + Right sum)
     </h2>
-    <div id="avgResults" class="results"></div>
+    <div id="normResults" class="results"></div>
   </main>
 
   <!-- Local copies (offline use). If missing/blocked, fall back to a CDN. -->
@@ -79,6 +79,6 @@
   <script>
     window.ExcelJS || document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"><\/script>');
   </script>
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

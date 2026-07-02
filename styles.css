@@ -29,6 +29,30 @@ main {
   padding: 2rem 1.25rem 4rem;
 }
 
+/* Language toggle (top-left) */
+.lang-toggle {
+  position: fixed;
+  top: 1rem;
+  left: 1rem;
+  z-index: 10;
+  background: var(--card);
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: .4rem .9rem;
+  font-size: .9rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .08);
+  transition: background .15s, color .15s;
+}
+.lang-toggle:hover { background: var(--accent); color: #fff; }
+
+@media (max-width: 720px) {
+  /* Keep the heading clear of the fixed toggle on narrow screens. */
+  header { padding-top: 2.5rem; }
+}
+
 h1 { margin: 0 0 .25rem; font-size: 1.9rem; }
 .subtitle { color: var(--muted); margin: .25rem 0 1.5rem; max-width: 70ch; }
 

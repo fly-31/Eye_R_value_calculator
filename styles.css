@@ -134,6 +134,14 @@ button.primary:hover:not(:disabled) { background: var(--accent-hover); }
 button.primary:disabled { background: #9db4e0; cursor: not-allowed; }
 .red-note { color: var(--muted); font-size: .9rem; }
 
+/* Average table heading */
+.avg-heading {
+  margin: 2rem 0 .25rem;
+  font-size: 1.15rem;
+  padding-top: 1rem;
+  border-top: 2px solid var(--border);
+}
+
 /* Results table */
 .results { overflow-x: auto; margin-top: .5rem; }
 table {

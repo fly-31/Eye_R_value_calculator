@@ -60,6 +60,7 @@ const I18N = {
     redNote: "🔴 Red columns are <strong>R-type</strong> categories.",
     colPatient: "Patient",
     colEye: "Eye",
+    avgHeading: "Average of Left & Right eye",
     dirHorizontal: "Horizontal",
     dirVertical: "Vertical",
     statusProcessing: "Processing…",
@@ -105,6 +106,7 @@ const I18N = {
     redNote: "🔴 빨간색 열은 <strong>R 유형</strong> 카테고리입니다.",
     colPatient: "환자",
     colEye: "눈",
+    avgHeading: "좌·우안 평균",
     dirHorizontal: "수평",
     dirVertical: "수직",
     statusProcessing: "처리 중…",
@@ -178,6 +180,16 @@ function parsePatient(name) {
     if (fromFolder) return fromFolder;
   }
   return patientFromFilename(fileSeg);
+}
+
+/** Ordering key: the folder name (e.g. '2025-02-24 이대라') when present, else
+ *  the filename. Sorting by this reproduces the name/date order shown when the
+ *  zip is opened in the file explorer.
+ */
+function patientSortKey(patientSource) {
+  const segments = patientSource.replace(/\\/g, "/").split("/").filter((s) => s.length);
+  if (segments.length >= 2) return segments[segments.length - 2];
+  return segments[segments.length - 1] || "";
 }
 
 function parseCategory(name) {
@@ -309,7 +321,12 @@ async function processUploads(files) {
     }
     try {
       const r2 = computeFileR2(u8);
-      results.push({ patient: parsePatient(patientSource), category, r2 });
+      results.push({
+        patient: parsePatient(patientSource),
+        category,
+        r2,
+        sortKey: patientSortKey(patientSource),
+      });
     } catch (err) {
       warn(warnings, "warnInvalid", name, err.message);
     }
@@ -373,8 +390,12 @@ function buildTable(results) {
   const columns = ordered.map((c) => c.label);
   const redColumns = ordered.filter((c) => c.type === "R").map((c) => c.label);
 
-  const patients = [];
-  for (const r of results) if (!patients.includes(r.patient)) patients.push(r.patient);
+  // Order patients by folder name (date-prefixed) -> matches explorer order.
+  const keyOf = new Map();
+  for (const r of results) if (!keyOf.has(r.patient)) keyOf.set(r.patient, r.sortKey || "");
+  const patients = [...keyOf.keys()].sort((a, b) =>
+    keyOf.get(a).localeCompare(keyOf.get(b), undefined, { numeric: true })
+  );
 
   const cells = new Map(); // key `${patient}||${eye}` -> {label: value}
   for (const r of results) {
@@ -392,7 +413,31 @@ function buildTable(results) {
       rows.push({ patient, eye, values });
     }
   }
-  return { columns, redColumns, patients, rows };
+
+  // Average of Left (LH) + Right (RH) per patient/category (uses whichever
+  // eyes are present; a category with no data stays NaN).
+  const collected = new Map(); // patient -> {label: [values]}
+  for (const r of results) {
+    if (!collected.has(r.patient)) collected.set(r.patient, {});
+    const bucket = collected.get(r.patient);
+    for (const eye of EYES) {
+      const v = r.r2[eye];
+      if (Number.isFinite(v)) (bucket[r.category.label] ||= []).push(v);
+    }
+  }
+  const averageRows = patients.map((patient) => {
+    const bucket = collected.get(patient) || {};
+    const values = {};
+    for (const label of columns) {
+      const vals = bucket[label];
+      values[label] = vals && vals.length
+        ? vals.reduce((s, x) => s + x, 0) / vals.length
+        : NaN;
+    }
+    return { patient, values };
+  });
+
+  return { columns, redColumns, patients, rows, averageRows };
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +474,26 @@ async function toExcelBlob(table) {
 
   for (const row of table.rows) {
     const values = [row.patient, row.eye];
+    for (const label of table.columns) values.push(roundR(row.values[label]));
+    const r = ws.addRow(values);
+    for (let i = 3; i <= headers.length; i++) r.getCell(i).numFmt = EXCEL_NUM_FMT;
+  }
+
+  // --- Average (Left + Right) section, below the original table ---
+  ws.addRow([]);
+  const titleRow = ws.addRow(["Average (Left + Right)"]);
+  titleRow.getCell(1).font = { bold: true };
+  const avgHeaderNames = ["Patient", "", ...table.columns];
+  const avgHeaderRow = ws.addRow(avgHeaderNames);
+  avgHeaderNames.forEach((name, i) => {
+    const cell = avgHeaderRow.getCell(i + 1);
+    const isRed = table.redColumns.includes(name);
+    cell.font = { bold: true, color: { argb: isRed ? "FFFF0000" : "FF000000" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF2F2F2" } };
+    cell.alignment = { horizontal: "center" };
+  });
+  for (const row of table.averageRows) {
+    const values = [row.patient, ""];
     for (const label of table.columns) values.push(roundR(row.values[label]));
     const r = ws.addRow(values);
     for (let i = 3; i <= headers.length; i++) r.getCell(i).numFmt = EXCEL_NUM_FMT;
@@ -480,6 +545,33 @@ function renderTable(table) {
   els.results.innerHTML = html;
 }
 
+function renderAverageTable(table) {
+  if (!table || !table.averageRows.length) {
+    els.avgResults.innerHTML = "";
+    els.avgHeading.style.display = "none";
+    return;
+  }
+  els.avgHeading.style.display = "block";
+  const headers = [t("colPatient"), ...table.columns.map(categoryLabelDisplay)];
+  const redSet = new Set(table.redColumns.map(categoryLabelDisplay));
+  let html = "<table><thead><tr>";
+  for (const h of headers) {
+    const red = redSet.has(h) ? ' class="red"' : "";
+    html += `<th${red}>${h}</th>`;
+  }
+  html += "</tr></thead><tbody>";
+  for (const row of table.averageRows) {
+    html += `<tr><td class="patient">${row.patient}</td>`;
+    for (const label of table.columns) {
+      const red = table.redColumns.includes(label) ? ' class="red"' : "";
+      html += `<td${red}>${fmt(row.values[label])}</td>`;
+    }
+    html += "</tr>";
+  }
+  html += "</tbody></table>";
+  els.avgResults.innerHTML = html;
+}
+
 function renderWarnings(warnings) {
   lastWarnings = warnings;
   els.warnings.innerHTML = warnings
@@ -518,6 +610,7 @@ async function handleFiles(fileList) {
     setStatus({ type: "noValid" });
     lastTable = null;
     renderTable(null);
+    renderAverageTable(null);
     els.download.disabled = true;
     els.redNote.style.display = "none";
     return;
@@ -527,6 +620,7 @@ async function handleFiles(fileList) {
   lastTable = table;
   setStatus({ type: "processed", n: results.length, p: table.patients.length });
   renderTable(table);
+  renderAverageTable(table);
   els.download.disabled = false;
   els.redNote.style.display = table.redColumns.length ? "block" : "none";
 }
@@ -567,6 +661,7 @@ function applyTranslations() {
   renderStatus();
   renderWarnings(lastWarnings);
   renderTable(lastTable);
+  renderAverageTable(lastTable);
 }
 
 function setLang(lang) {
@@ -582,6 +677,8 @@ window.addEventListener("DOMContentLoaded", () => {
   els.status = document.getElementById("status");
   els.download = document.getElementById("downloadBtn");
   els.redNote = document.getElementById("redNote");
+  els.avgHeading = document.getElementById("avgHeading");
+  els.avgResults = document.getElementById("avgResults");
   els.langToggle = document.getElementById("langToggle");
 
   applyTranslations();

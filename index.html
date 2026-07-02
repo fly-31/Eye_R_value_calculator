@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Eye Movement R² Calculator</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main>
+    <header>
+      <h1>👁️ Eye Movement R² Calculator</h1>
+      <p class="subtitle">
+        Upload eye-tracking recordings and download a spreadsheet of
+        <strong>R² values</strong> (how strongly each eye's position correlates
+        with time) for every category. Everything runs in your browser — nothing
+        is uploaded to a server.
+      </p>
+    </header>
+
+    <details class="info">
+      <summary>ℹ️ How to use / required data format</summary>
+      <ol>
+        <li>Your files must match the column format in this template:
+          <a id="templateLink" href="#" target="_blank" rel="noopener">Example Google Sheet</a>.</li>
+        <li>Each recording is a <code>.csv</code> with columns
+          <code>Time(sec), LH, RH, LV, RV, TargetH, TargetV</code>.</li>
+        <li>Upload the individual <code>.csv</code> files <strong>or</strong> a
+          <code>.zip</code> containing them (one zip per patient works well).</li>
+        <li>Patient name and category (Horizontal/Vertical, frequency, B/R) are
+          read automatically from the file names — keep the original names.</li>
+      </ol>
+      <p class="warning">
+        ⚠️ The calculator will not work if the files are not in the correct
+        format. Only the <strong>LH</strong> and <strong>RH</strong> channels are
+        used (this matches the reference sheet).
+      </p>
+    </details>
+
+    <section id="dropZone" class="dropzone" tabindex="0">
+      <input id="fileInput" type="file" accept=".csv,.zip" multiple hidden />
+      <div class="dz-inner">
+        <div class="dz-icon">⬆️</div>
+        <p><strong>Drag &amp; drop</strong> your <code>.csv</code> or
+          <code>.zip</code> files here</p>
+        <p class="dz-sub">or click to browse</p>
+      </div>
+    </section>
+
+    <div id="status" class="status"></div>
+    <div id="warnings"></div>
+
+    <div class="actions">
+      <button id="downloadBtn" class="primary" disabled>
+        ⬇️ Download Excel spreadsheet
+      </button>
+      <span id="redNote" class="red-note" style="display:none">
+        🔴 Red columns are <strong>R-type</strong> categories.
+      </span>
+    </div>
+
+    <div id="results" class="results"></div>
+  </main>
+
+  <script src="vendor/jszip.min.js"></script>
+  <script src="vendor/exceljs.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

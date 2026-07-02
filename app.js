@@ -144,14 +144,40 @@ function baseName(name) {
   return name.replace(/\\/g, "/").split("/").pop();
 }
 
+function stripSeparators(s) {
+  return s.replace(/^[\s_\-\t]+|[\s_\-\t]+$/g, "");
+}
+
+function stripDate(s) {
+  return s.replace(/^\d{4}[-.]\d{2}[-.]\d{2}\s+/, "").trim();
+}
+
+/** Parse the patient name from a bare filename (no folder).
+ *  The name is the prefix before the 'MG' / 'VOG' device marker:
+ *    '이대라_MG VOG -_Horizontal ...' -> '이대라'
+ *    '송나리 MG_Horizontal ...'       -> '송나리'  (healthy-control style)
+ */
+function patientFromFilename(file) {
+  const base = file.replace(/\.(zip|csv)$/i, "");
+  const m = base.match(/^(.*?)\s*MG[\s_]/i);
+  let head = m ? m[1] : base.split(/VOG/i)[0].replace(/MG\s*$/i, "");
+  return stripDate(stripSeparators(head)).trim();
+}
+
+/** Extract the patient name from a file path or filename.
+ *  Prefers the containing folder ('2023-07-07 송나리/..' -> '송나리'), which is
+ *  reliable across all naming styles, so every category of one patient stays
+ *  grouped under a single name. Falls back to parsing the filename.
+ */
 function parsePatient(name) {
-  let base = baseName(name).replace(/\.(zip|csv)$/i, "");
-  // Cut everything from 'VOG' onward; the patient name is the prefix.
-  let head = base.split(/VOG/i)[0];
-  head = head.replace(/MG\s*$/i, "");        // drop trailing 'MG' marker
-  head = head.replace(/^[\s_\-\t]+|[\s_\-\t]+$/g, ""); // strip separators
-  head = head.replace(/^\d{4}-\d{2}-\d{2}\s+/, ""); // drop leading date
-  return head.trim();
+  const segments = name.replace(/\\/g, "/").split("/").filter((s) => s.length);
+  const fileSeg = segments[segments.length - 1] || "";
+  const folderSeg = segments.length >= 2 ? segments[segments.length - 2] : null;
+  if (folderSeg) {
+    const fromFolder = stripDate(stripSeparators(folderSeg)).trim();
+    if (fromFolder) return fromFolder;
+  }
+  return patientFromFilename(fileSeg);
 }
 
 function parseCategory(name) {

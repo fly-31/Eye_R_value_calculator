@@ -1,13 +1,17 @@
 /*
- * Eye Movement R² Calculator — browser logic.
+ * Shared engine for the two calculators (R² and slope).
  *
- * Same verified algorithm as the reference workflow:
- *   R² = (Pearson correlation of eye position vs. Time)²,
- *   computed on the LH and RH channels only (LV/RV unused),
- *   for both horizontal and vertical saccade files.
+ * The page sets `window.APP` (metric, labels, nav target) BEFORE loading this
+ * file; everything else — CSV/zip parsing, patient grouping, sorting, i18n,
+ * tables and Excel export — is identical between the two sites.
  *
- * Everything runs client-side. No server, no upload leaves the machine.
+ * Per file it computes, for the LH and RH channels vs. Time:
+ *   - metricId "r2":    R² = (Pearson correlation)²
+ *   - metricId "slope": m  = slope of the least-squares line y = m x + b
+ * Only LH and RH are used (LV/RV ignored). Everything runs client-side.
  */
+
+const APP = window.APP || { metricId: "r2", showNormalized: true };
 
 const TEMPLATE_URL =
   "https://docs.google.com/spreadsheets/d/1IQTNE3Myjq02l14CmzQXs7IanzrO20VaoszoD1NyKes/edit?usp=sharing";
@@ -17,24 +21,24 @@ const DIRECTIONS = ["Horizontal", "Vertical"];
 const FREQUENCIES = ["0.5", "0.75", "1"];
 const REQUIRED_COLUMNS = ["Time(sec)", "LH", "RH"];
 
-// Significant figures used by answer_key.xlsx (e.g. 0.02551, 0.3441, 0.4146).
-const SIG_FIGS = 4;
-// Number format applied to Excel cells; mirrors answer_key.xlsx.
-const EXCEL_NUM_FMT = "0.0000000";
+const SIG_FIGS = 4;                    // matches answer_key.xlsx precision
+const EXCEL_NUM_FMT = "0.0000000";     // number format for Excel cells
 
 // ---------------------------------------------------------------------------
-// Internationalization (English / Korean)
+// Internationalization (English / Korean). Page-specific overrides come from
+// APP.i18n (title / subtitle / navLabel differ between the two calculators).
 // ---------------------------------------------------------------------------
 
-const I18N = {
+const BASE_I18N = {
   en: {
-    langButton: "한국어",            // click to switch TO Korean
+    langButton: "한국어",
     title: "👁️ Eye Movement R² Calculator",
     subtitle:
       "Upload eye-tracking recordings and download a spreadsheet of " +
       "<strong>R² values</strong> (how strongly each eye's position correlates " +
       "with time) for every category. Everything runs in your browser — nothing " +
       "is uploaded to a server.",
+    navLabel: "↔",
     infoSummary: "ℹ️ How to use / required data format",
     step1:
       'Your files must match the column format in this template: ' +
@@ -60,29 +64,26 @@ const I18N = {
     redNote: "🔴 Red columns are <strong>R-type</strong> categories.",
     colPatient: "Patient",
     colEye: "Eye",
-    avgHeading: "Average of Left & Right eye",
     normHeading: "Divided by Vertical 0.75Hz (Left + Right sum)",
     dirHorizontal: "Horizontal",
     dirVertical: "Vertical",
     statusProcessing: "Processing…",
-    statusProcessed: (n, p) =>
-      `Processed ${n} recording(s) across ${p} patient(s).`,
+    statusProcessed: (n, p) => `Processed ${n} recording(s) across ${p} patient(s).`,
     statusNoValid: "No valid recordings found. Check the file format.",
-    warnBadDir: (name) =>
-      `Skipped "${name}": could not read direction/frequency from name.`,
+    warnBadDir: (name) => `Skipped "${name}": could not read direction/frequency from name.`,
     warnInvalid: (name, msg) => `Skipped "${name}": ${msg}`,
     warnBadZip: (name) => `Skipped "${name}": not a valid .zip file.`,
     warnNoCsv: (name) => `Skipped "${name}": zip contained no .csv files.`,
-    warnUnsupported: (name) =>
-      `Skipped "${name}": unsupported file type (need .csv or .zip).`,
+    warnUnsupported: (name) => `Skipped "${name}": unsupported file type (need .csv or .zip).`,
   },
   ko: {
-    langButton: "English",           // click to switch TO English
+    langButton: "English",
     title: "👁️ 안구 운동 R² 계산기",
     subtitle:
       "안구 추적 기록을 업로드하면 각 카테고리의 <strong>R² 값</strong>" +
       "(각 눈의 위치가 시간과 얼마나 상관되는지)을 계산한 스프레드시트를 " +
       "다운로드할 수 있습니다. 모든 계산은 브라우저에서 실행되며 서버로 전송되지 않습니다.",
+    navLabel: "↔",
     infoSummary: "ℹ️ 사용 방법 / 필수 데이터 형식",
     step1:
       "파일은 이 템플릿의 열 형식과 일치해야 합니다: " +
@@ -107,21 +108,23 @@ const I18N = {
     redNote: "🔴 빨간색 열은 <strong>R 유형</strong> 카테고리입니다.",
     colPatient: "환자",
     colEye: "눈",
-    avgHeading: "좌·우안 평균",
     normHeading: "수직 0.75Hz(좌+우 합)로 나눈 값",
     dirHorizontal: "수평",
     dirVertical: "수직",
     statusProcessing: "처리 중…",
     statusProcessed: (n, p) => `${n}개의 기록을 ${p}명의 환자에 대해 처리했습니다.`,
     statusNoValid: "유효한 기록을 찾을 수 없습니다. 파일 형식을 확인하세요.",
-    warnBadDir: (name) =>
-      `"${name}" 건너뜀: 파일 이름에서 방향/주파수를 읽을 수 없습니다.`,
+    warnBadDir: (name) => `"${name}" 건너뜀: 파일 이름에서 방향/주파수를 읽을 수 없습니다.`,
     warnInvalid: (name, msg) => `"${name}" 건너뜀: ${msg}`,
     warnBadZip: (name) => `"${name}" 건너뜀: 올바른 .zip 파일이 아닙니다.`,
     warnNoCsv: (name) => `"${name}" 건너뜀: zip에 .csv 파일이 없습니다.`,
-    warnUnsupported: (name) =>
-      `"${name}" 건너뜀: 지원되지 않는 파일 형식입니다 (.csv 또는 .zip 필요).`,
+    warnUnsupported: (name) => `"${name}" 건너뜀: 지원되지 않는 파일 형식입니다 (.csv 또는 .zip 필요).`,
   },
+};
+
+const I18N = {
+  en: { ...BASE_I18N.en, ...((APP.i18n && APP.i18n.en) || {}) },
+  ko: { ...BASE_I18N.ko, ...((APP.i18n && APP.i18n.ko) || {}) },
 };
 
 let currentLang = "en";
@@ -156,11 +159,6 @@ function stripDate(s) {
   return s.replace(/^\d{4}[-.]\d{2}[-.]\d{2}\s+/, "").trim();
 }
 
-/** Parse the patient name from a bare filename (no folder).
- *  The name is the prefix before the 'MG' / 'VOG' device marker:
- *    '이대라_MG VOG -_Horizontal ...' -> '이대라'
- *    '송나리 MG_Horizontal ...'       -> '송나리'  (healthy-control style)
- */
 function patientFromFilename(file) {
   const base = file.replace(/\.(zip|csv)$/i, "");
   const m = base.match(/^(.*?)\s*MG[\s_]/i);
@@ -168,11 +166,6 @@ function patientFromFilename(file) {
   return stripDate(stripSeparators(head)).trim();
 }
 
-/** Extract the patient name from a file path or filename.
- *  Prefers the containing folder ('2023-07-07 송나리/..' -> '송나리'), which is
- *  reliable across all naming styles, so every category of one patient stays
- *  grouped under a single name. Falls back to parsing the filename.
- */
 function parsePatient(name) {
   const segments = name.replace(/\\/g, "/").split("/").filter((s) => s.length);
   const fileSeg = segments[segments.length - 1] || "";
@@ -184,10 +177,6 @@ function parsePatient(name) {
   return patientFromFilename(fileSeg);
 }
 
-/** Ordering key: the folder name (e.g. '2025-02-24 이대라') when present, else
- *  the filename. Sorting by this reproduces the name/date order shown when the
- *  zip is opened in the file explorer.
- */
 function patientSortKey(patientSource) {
   const segments = patientSource.replace(/\\/g, "/").split("/").filter((s) => s.length);
   if (segments.length >= 2) return segments[segments.length - 2];
@@ -208,12 +197,11 @@ function parseCategory(name) {
   const typeMatch = base.match(/Saccade\s+([BR])\b/i);
   const type = typeMatch ? typeMatch[1].toUpperCase() : "B";
 
-  const label = `${direction} ${frequency}Hz ${type}`;
-  return { direction, frequency, type, label };
+  return { direction, frequency, type, label: `${direction} ${frequency}Hz ${type}` };
 }
 
 // ---------------------------------------------------------------------------
-// CSV reading + R²
+// CSV reading + per-file metric (R² or slope)
 // ---------------------------------------------------------------------------
 
 class InvalidCsvError extends Error {}
@@ -259,9 +247,7 @@ function readChannels(bytes) {
 function rSquared(x, y) {
   let n = 0, sx = 0, sy = 0;
   for (let i = 0; i < x.length; i++) {
-    if (Number.isFinite(x[i]) && Number.isFinite(y[i])) {
-      n++; sx += x[i]; sy += y[i];
-    }
+    if (Number.isFinite(x[i]) && Number.isFinite(y[i])) { n++; sx += x[i]; sy += y[i]; }
   }
   if (n < 2) return NaN;
   const mx = sx / n, my = sy / n;
@@ -277,11 +263,35 @@ function rSquared(x, y) {
   return r * r;
 }
 
-function computeFileR2(bytes) {
+/** Slope m of the least-squares line y = m x + b. NaN if <2 pts or no x-variance. */
+function slope(x, y) {
+  let n = 0, sx = 0, sy = 0;
+  for (let i = 0; i < x.length; i++) {
+    if (Number.isFinite(x[i]) && Number.isFinite(y[i])) { n++; sx += x[i]; sy += y[i]; }
+  }
+  if (n < 2) return NaN;
+  const mx = sx / n, my = sy / n;
+  let sxy = 0, sxx = 0;
+  for (let i = 0; i < x.length; i++) {
+    if (Number.isFinite(x[i]) && Number.isFinite(y[i])) {
+      const dx = x[i] - mx;
+      sxy += dx * (y[i] - my); sxx += dx * dx;
+    }
+  }
+  if (sxx === 0) return NaN;
+  return sxy / sxx;
+}
+
+function metricFn() {
+  return APP.metricId === "slope" ? slope : rSquared;
+}
+
+function computeFileMetric(bytes) {
   const ch = readChannels(bytes);
-  const t = ch["Time(sec)"];
+  const time = ch["Time(sec)"];
+  const fn = metricFn();
   const out = {};
-  for (const eye of EYES) out[eye] = rSquared(t, ch[eye]);
+  for (const eye of EYES) out[eye] = fn(time, ch[eye]);
   return out;
 }
 
@@ -302,10 +312,7 @@ function decodeZipName(bytes) {
   }
 }
 
-/*
- * Warnings are stored as { fn, args } so they can be rendered in whichever
- * language is active when they are shown, e.g. { fn: "warnBadZip", args: [name] }.
- */
+/* Warnings are stored as { fn, args } so they render in the active language. */
 function warn(list, fn, ...args) {
   list.push({ fn, args });
 }
@@ -322,11 +329,11 @@ async function processUploads(files) {
       return;
     }
     try {
-      const r2 = computeFileR2(u8);
+      const metric = computeFileMetric(u8);
       results.push({
         patient: parsePatient(patientSource),
         category,
-        r2,
+        metric,
         sortKey: patientSortKey(patientSource),
       });
     } catch (err) {
@@ -351,9 +358,7 @@ async function processUploads(files) {
       const entries = Object.values(zip.files).filter(
         (e) => !e.dir && e.name.toLowerCase().endsWith(".csv")
       );
-      if (entries.length === 0) {
-        warn(warnings, "warnNoCsv", f.name);
-      }
+      if (entries.length === 0) warn(warnings, "warnNoCsv", f.name);
       for (const entry of entries) {
         const u8 = await entry.async("uint8array");
         const patientSource = entry.name.includes("/") ? entry.name : f.name;
@@ -380,7 +385,6 @@ function categorySortKey(c) {
   ];
 }
 
-/** Returns {columns, redColumns, patients, rows:[{patient,eye,values:{label:v}}]}. */
 function buildTable(results) {
   const cats = new Map();
   for (const r of results) cats.set(r.category.label, r.category);
@@ -404,7 +408,7 @@ function buildTable(results) {
     for (const eye of EYES) {
       const key = `${r.patient}||${eye}`;
       if (!cells.has(key)) cells.set(key, {});
-      cells.get(key)[r.category.label] = r.r2[eye];
+      cells.get(key)[r.category.label] = r.metric[eye];
     }
   }
 
@@ -416,31 +420,8 @@ function buildTable(results) {
     }
   }
 
-  // Average of Left (LH) + Right (RH) per patient/category (uses whichever
-  // eyes are present; a category with no data stays NaN).
-  const collected = new Map(); // patient -> {label: [values]}
-  for (const r of results) {
-    if (!collected.has(r.patient)) collected.set(r.patient, {});
-    const bucket = collected.get(r.patient);
-    for (const eye of EYES) {
-      const v = r.r2[eye];
-      if (Number.isFinite(v)) (bucket[r.category.label] ||= []).push(v);
-    }
-  }
-  const averageRows = patients.map((patient) => {
-    const bucket = collected.get(patient) || {};
-    const values = {};
-    for (const label of columns) {
-      const vals = bucket[label];
-      values[label] = vals && vals.length
-        ? vals.reduce((s, x) => s + x, 0) / vals.length
-        : NaN;
-    }
-    return { patient, values };
-  });
-
   // Normalized: each value / combined (LH+RH sum) Vertical 0.75Hz of the SAME
-  // type (B columns use 'Vertical 0.75Hz B', R columns use 'Vertical 0.75Hz R').
+  // type. Only used by the R² page (APP.showNormalized).
   const typeOf = {};
   for (const c of ordered) typeOf[c.label] = c.type;
   const normalizedRows = [];
@@ -465,20 +446,18 @@ function buildTable(results) {
     }
   }
 
-  return { columns, redColumns, patients, rows, averageRows, normalizedRows };
+  return { columns, redColumns, patients, rows, normalizedRows };
 }
 
 // ---------------------------------------------------------------------------
-// Number formatting (match answer_key: 4 significant figures)
+// Number formatting (4 significant figures)
 // ---------------------------------------------------------------------------
 
-/** On-screen string, e.g. 0.0255086 -> "0.02551", 0.0001801 -> "0.0001801". */
 function fmt(v) {
   return Number.isFinite(v) ? v.toPrecision(SIG_FIGS) : "";
 }
 
-/** Numeric value rounded to the answer-key precision, for Excel cells. */
-function roundR(v) {
+function roundVal(v) {
   return Number.isFinite(v) ? Number(v.toPrecision(SIG_FIGS)) : null;
 }
 
@@ -486,45 +465,38 @@ function roundR(v) {
 // Excel export (ExcelJS, styled)
 // ---------------------------------------------------------------------------
 
+function styleHeaderCell(cell, name, redColumns) {
+  const isRed = redColumns.includes(name);
+  cell.font = { bold: true, color: { argb: isRed ? "FFFF0000" : "FF000000" } };
+  cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF2F2F2" } };
+  cell.alignment = { horizontal: "center" };
+}
+
 async function toExcelBlob(table) {
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet("R^2 values");
+  const ws = wb.addWorksheet(APP.sheetName || "values");
   const headers = ["Patient", "Eye", ...table.columns];
 
   const headerRow = ws.addRow(headers);
-  headerRow.eachCell((cell, col) => {
-    const name = headers[col - 1];
-    const isRed = table.redColumns.includes(name);
-    cell.font = { bold: true, color: { argb: isRed ? "FFFF0000" : "FF000000" } };
-    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF2F2F2" } };
-    cell.alignment = { horizontal: "center" };
-  });
+  headerRow.eachCell((cell, col) => styleHeaderCell(cell, headers[col - 1], table.redColumns));
 
-  for (const row of table.rows) {
-    const values = [row.patient, row.eye];
-    for (const label of table.columns) values.push(roundR(row.values[label]));
-    const r = ws.addRow(values);
-    for (let i = 3; i <= headers.length; i++) r.getCell(i).numFmt = EXCEL_NUM_FMT;
-  }
+  const addDataRows = (dataRows) => {
+    for (const row of dataRows) {
+      const values = [row.patient, row.eye];
+      for (const label of table.columns) values.push(roundVal(row.values[label]));
+      const r = ws.addRow(values);
+      for (let i = 3; i <= headers.length; i++) r.getCell(i).numFmt = EXCEL_NUM_FMT;
+    }
+  };
+  addDataRows(table.rows);
 
-  // --- Normalized section (÷ combined Vertical 0.75Hz), below the original ---
-  ws.addRow([]);
-  const titleRow = ws.addRow(["Divided by Vertical 0.75Hz (Left + Right sum)"]);
-  titleRow.getCell(1).font = { bold: true };
-  const normHeaderNames = ["Patient", "Eye", ...table.columns];
-  const normHeaderRow = ws.addRow(normHeaderNames);
-  normHeaderNames.forEach((name, i) => {
-    const cell = normHeaderRow.getCell(i + 1);
-    const isRed = table.redColumns.includes(name);
-    cell.font = { bold: true, color: { argb: isRed ? "FFFF0000" : "FF000000" } };
-    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF2F2F2" } };
-    cell.alignment = { horizontal: "center" };
-  });
-  for (const row of table.normalizedRows) {
-    const values = [row.patient, row.eye];
-    for (const label of table.columns) values.push(roundR(row.values[label]));
-    const r = ws.addRow(values);
-    for (let i = 3; i <= headers.length; i++) r.getCell(i).numFmt = EXCEL_NUM_FMT;
+  if (APP.showNormalized) {
+    ws.addRow([]);
+    const titleRow = ws.addRow(["Divided by Vertical 0.75Hz (Left + Right sum)"]);
+    titleRow.getCell(1).font = { bold: true };
+    const normHeader = ws.addRow(headers);
+    normHeader.eachCell((cell, col) => styleHeaderCell(cell, headers[col - 1], table.redColumns));
+    addDataRows(table.normalizedRows);
   }
 
   headers.forEach((name, i) => {
@@ -545,9 +517,8 @@ async function toExcelBlob(table) {
 const els = {};
 let lastTable = null;
 let lastWarnings = [];
-let statusState = null; // {type:'processing'} | {type:'processed', n, p} | {type:'noValid'}
+let statusState = null;
 
-/** Build HTML for a Patient/Eye table (original or normalized). */
 function eyeTableHtml(table, dataRows) {
   const headers = [t("colPatient"), t("colEye"), ...table.columns.map(categoryLabelDisplay)];
   const redSet = new Set(table.redColumns.map(categoryLabelDisplay));
@@ -573,40 +544,14 @@ function renderTable(table) {
 }
 
 function renderNormalizedTable(table) {
-  if (!table || !table.normalizedRows.length) {
+  if (!els.normResults) return; // page has no normalized section
+  if (!APP.showNormalized || !table || !table.normalizedRows.length) {
     els.normResults.innerHTML = "";
-    els.normHeading.style.display = "none";
+    if (els.normHeading) els.normHeading.style.display = "none";
     return;
   }
   els.normHeading.style.display = "block";
   els.normResults.innerHTML = eyeTableHtml(table, table.normalizedRows);
-}
-
-function renderAverageTable(table) {
-  if (!table || !table.averageRows.length) {
-    els.avgResults.innerHTML = "";
-    els.avgHeading.style.display = "none";
-    return;
-  }
-  els.avgHeading.style.display = "block";
-  const headers = [t("colPatient"), ...table.columns.map(categoryLabelDisplay)];
-  const redSet = new Set(table.redColumns.map(categoryLabelDisplay));
-  let html = "<table><thead><tr>";
-  for (const h of headers) {
-    const red = redSet.has(h) ? ' class="red"' : "";
-    html += `<th${red}>${h}</th>`;
-  }
-  html += "</tr></thead><tbody>";
-  for (const row of table.averageRows) {
-    html += `<tr><td class="patient">${row.patient}</td>`;
-    for (const label of table.columns) {
-      const red = table.redColumns.includes(label) ? ' class="red"' : "";
-      html += `<td${red}>${fmt(row.values[label])}</td>`;
-    }
-    html += "</tr>";
-  }
-  html += "</tbody></table>";
-  els.avgResults.innerHTML = html;
 }
 
 function renderWarnings(warnings) {
@@ -618,15 +563,12 @@ function renderWarnings(warnings) {
 
 function renderStatus() {
   const s = statusState;
-  if (!s) {
-    els.status.innerHTML = "";
-  } else if (s.type === "processing") {
-    els.status.innerHTML = t("statusProcessing");
-  } else if (s.type === "processed") {
+  if (!s) els.status.innerHTML = "";
+  else if (s.type === "processing") els.status.innerHTML = t("statusProcessing");
+  else if (s.type === "processed")
     els.status.innerHTML = `<span class="ok">${t("statusProcessed")(s.n, s.p)}</span>`;
-  } else if (s.type === "noValid") {
+  else if (s.type === "noValid")
     els.status.innerHTML = `<span class="error">${t("statusNoValid")}</span>`;
-  }
 }
 
 function setStatus(state) {
@@ -636,9 +578,7 @@ function setStatus(state) {
 
 async function handleFiles(fileList) {
   const files = [];
-  for (const f of fileList) {
-    files.push({ name: f.name, buffer: await f.arrayBuffer() });
-  }
+  for (const f of fileList) files.push({ name: f.name, buffer: await f.arrayBuffer() });
   setStatus({ type: "processing" });
   const { results, warnings } = await processUploads(files);
   renderWarnings(warnings);
@@ -674,7 +614,7 @@ async function downloadExcel() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `R_values_${stamp()}.xlsx`;
+  a.download = `${APP.fileStem || "values"}_${stamp()}.xlsx`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -689,12 +629,10 @@ function applyTranslations() {
   document.querySelectorAll("[data-i18n-html]").forEach((el) => {
     el.innerHTML = t(el.dataset.i18nHtml);
   });
-  // The template link lives inside a translated <li>, so re-bind it each time.
   const link = document.getElementById("templateLink");
   if (link) link.href = TEMPLATE_URL;
   els.langToggle.textContent = t("langButton");
 
-  // Re-render dynamic parts that are already on screen.
   renderStatus();
   renderWarnings(lastWarnings);
   renderTable(lastTable);
@@ -717,7 +655,9 @@ window.addEventListener("DOMContentLoaded", () => {
   els.normHeading = document.getElementById("normHeading");
   els.normResults = document.getElementById("normResults");
   els.langToggle = document.getElementById("langToggle");
+  els.navLink = document.getElementById("navLink");
 
+  if (els.navLink && APP.otherHref) els.navLink.href = APP.otherHref;
   applyTranslations();
 
   els.langToggle.addEventListener("click", () =>

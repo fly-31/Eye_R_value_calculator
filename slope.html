@@ -3,20 +3,19 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Eye Movement R² Calculator</title>
-  <!-- Bump ?v= on each deploy so browsers fetch the new file instead of a cached copy. -->
+  <title>Eye Movement Slope (m) Calculator</title>
   <link rel="stylesheet" href="styles.css?v=5" />
 </head>
 <body>
   <button id="langToggle" class="lang-toggle" type="button">한국어</button>
-  <a id="navLink" class="nav-link" href="slope.html" data-i18n="navLabel">📈 Slope (m) calculator →</a>
+  <a id="navLink" class="nav-link" href="index.html" data-i18n="navLabel">👁️ R² calculator →</a>
 
   <main>
     <header>
-      <h1 data-i18n="title">👁️ Eye Movement R² Calculator</h1>
+      <h1 data-i18n="title">📈 Eye Movement Slope (m) Calculator</h1>
       <p class="subtitle" data-i18n-html="subtitle">
-        Upload eye-tracking recordings and download a spreadsheet of
-        <strong>R² values</strong> for every category.
+        Upload eye-tracking recordings and download a spreadsheet of the
+        <strong>slope (m)</strong> of the best-fit line for every category.
       </p>
     </header>
 
@@ -58,24 +57,35 @@
     </div>
 
     <div id="results" class="results"></div>
-
-    <h2 id="normHeading" class="avg-heading" style="display:none" data-i18n="normHeading">
-      Divided by Vertical 0.75Hz (Left + Right sum)
-    </h2>
-    <div id="normResults" class="results"></div>
   </main>
 
   <script>
-    // Page config consumed by core.js (must load BEFORE it).
+    // Slope-calculator config consumed by core.js (must load BEFORE it).
     window.APP = {
-      metricId: "r2",
-      showNormalized: true,
-      sheetName: "R^2 values",
-      fileStem: "R_values",
-      otherHref: "slope.html",
+      metricId: "slope",
+      showNormalized: false,
+      sheetName: "Slope (m)",
+      fileStem: "Slope_values",
+      otherHref: "index.html",
       i18n: {
-        en: { navLabel: "📈 Slope (m) calculator →" },
-        ko: { navLabel: "📈 기울기(m) 계산기 →" },
+        en: {
+          title: "📈 Eye Movement Slope (m) Calculator",
+          subtitle:
+            "Upload eye-tracking recordings and download a spreadsheet of the " +
+            "<strong>slope (m)</strong> of the least-squares line <em>y = mx + b</em> " +
+            "(eye position vs. time) for every category. Everything runs in your " +
+            "browser — nothing is uploaded to a server.",
+          navLabel: "👁️ R² calculator →",
+        },
+        ko: {
+          title: "📈 안구 운동 기울기(m) 계산기",
+          subtitle:
+            "안구 추적 기록을 업로드하면 각 카테고리에 대해 최소제곱 직선 " +
+            "<em>y = mx + b</em>(눈 위치 대 시간)의 <strong>기울기(m)</strong>를 " +
+            "계산한 스프레드시트를 다운로드할 수 있습니다. 모든 계산은 브라우저에서 " +
+            "실행되며 서버로 전송되지 않습니다.",
+          navLabel: "👁️ R² 계산기 →",
+        },
       },
     };
   </script>

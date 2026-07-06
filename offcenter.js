@@ -1,44 +1,49 @@
 /*
- * Shared engine for the two calculators (R² and slope).
+ * Off-Center Eye Movement R² — browser logic.
  *
- * The page sets `window.APP` (metric, labels, nav target) BEFORE loading this
- * file; everything else — CSV/zip parsing, patient grouping, sorting, i18n,
- * tables and Excel export — is identical between the two sites.
+ * Splits each recording's eye positions into two off-center groups:
+ *   "Above" = samples where eye value > +2,  "Below" = samples where eye < -2
+ * (the ±2 range is treated as "center" and ignored). For each group it computes
+ * R² of eye position vs. Time — i.e. how the eye behaves once it is off-center.
  *
- * Per file it computes, for the LH and RH channels vs. Time:
- *   - metricId "r2":    R² = (Pearson correlation)²
- *   - metricId "slope": m  = slope of the least-squares line y = m x + b
- * Only LH and RH are used (LV/RV ignored). Everything runs client-side.
+ * Correct channel per direction: Horizontal -> LH/RH, Vertical -> LV/RV.
+ * Everything runs client-side. No server, no upload leaves the machine.
  */
-
-const APP = window.APP || { metricId: "r2", showNormalized: true };
 
 const TEMPLATE_URL =
   "https://docs.google.com/spreadsheets/d/1IQTNE3Myjq02l14CmzQXs7IanzrO20VaoszoD1NyKes/edit?usp=sharing";
 
-const EYES = ["LH", "RH"];
+const CENTER = 2; // |eye| <= CENTER is treated as centered and excluded
+const SIDES = ["Left", "Right"];
+const REGIONS = ["Above", "Below"];
 const DIRECTIONS = ["Horizontal", "Vertical"];
 const FREQUENCIES = ["0.5", "0.75", "1"];
-const REQUIRED_COLUMNS = ["Time(sec)", "LH", "RH"];
+const REQUIRED_COLUMNS = ["Time(sec)", "LH", "RH", "LV", "RV"];
 
-const SIG_FIGS = 4;                    // matches answer_key.xlsx precision
-const EXCEL_NUM_FMT = "0.0000000";     // number format for Excel cells
+const SIG_FIGS = 4;
+const EXCEL_NUM_FMT = "0.0000000";
+
+function channelsFor(direction) {
+  return direction === "Vertical"
+    ? { Left: "LV", Right: "RV" }
+    : { Left: "LH", Right: "RH" };
+}
 
 // ---------------------------------------------------------------------------
-// Internationalization (English / Korean). Page-specific overrides come from
-// APP.i18n (title / subtitle / navLabel differ between the two calculators).
+// Internationalization (English / Korean)
 // ---------------------------------------------------------------------------
 
-const BASE_I18N = {
+const I18N = {
   en: {
     langButton: "한국어",
-    title: "👁️ Eye Movement R² Calculator",
+    navLabel: "🩺 MG screening →",
+    title: "👁️ Off-Center Eye Movement R² (tired eyes)",
     subtitle:
-      "Upload eye-tracking recordings and download a spreadsheet of " +
-      "<strong>R² values</strong> (how strongly each eye's position correlates " +
-      "with time) for every category. Everything runs in your browser — nothing " +
-      "is uploaded to a server.",
-    navLabel: "↔",
+      "Upload eye-tracking recordings; the tool uses only the <strong>second half</strong> " +
+      "of each recording (tired eyes) and, within it, keeps only the <strong>off-center</strong> " +
+      "samples (eye position <strong>above +2</strong> or <strong>below −2</strong>, " +
+      "ignoring the ±2 center), then computes <strong>R² vs. time</strong> for each group. " +
+      "Everything runs in your browser; nothing is uploaded to a server.",
     infoSummary: "ℹ️ How to use / required data format",
     step1:
       'Your files must match the column format in this template: ' +
@@ -50,21 +55,25 @@ const BASE_I18N = {
       "Upload the individual <code>.csv</code> files <strong>or</strong> a " +
       "<code>.zip</code> containing them (one zip per patient works well).",
     step4:
-      "Patient name and category (Horizontal/Vertical, frequency, B/R) are " +
-      "read automatically from the file names — keep the original names.",
+      "Horizontal categories use the <strong>LH/RH</strong> channels; vertical use " +
+      "<strong>LV/RV</strong>. Patient name and category are read from the file names.",
     warning:
-      "⚠️ The calculator will not work if the files are not in the correct " +
-      "format. Only the <strong>LH</strong> and <strong>RH</strong> channels are " +
-      "used (this matches the reference sheet).",
+      "⚠️ The calculator will not work if the files are not in the correct format. " +
+      "A group is left blank if the eye rarely reaches that side.",
     dropTitle:
       "<strong>Drag &amp; drop</strong> your <code>.csv</code> or " +
       "<code>.zip</code> files here",
     dropSub: "or click to browse",
     downloadBtn: "⬇️ Download Excel spreadsheet",
     redNote: "🔴 Red columns are <strong>R-type</strong> categories.",
+    regionHeading: "Off-center R² — second half only (Above = eye > +2, Below = eye < −2, vs. time)",
     colPatient: "Patient",
     colEye: "Eye",
-    normHeading: "Divided by Vertical 0.75Hz (Left + Right sum)",
+    colRegion: "Region",
+    eyeLeft: "Left",
+    eyeRight: "Right",
+    regionAbove: "Above +2",
+    regionBelow: "Below −2",
     dirHorizontal: "Horizontal",
     dirVertical: "Vertical",
     statusProcessing: "Processing…",
@@ -78,12 +87,14 @@ const BASE_I18N = {
   },
   ko: {
     langButton: "English",
-    title: "👁️ 안구 운동 R² 계산기",
+    navLabel: "🩺 MG 선별 →",
+    title: "👁️ 중심 이탈 안구 운동 R² (피로한 눈)",
     subtitle:
-      "안구 추적 기록을 업로드하면 각 카테고리의 <strong>R² 값</strong>" +
-      "(각 눈의 위치가 시간과 얼마나 상관되는지)을 계산한 스프레드시트를 " +
-      "다운로드할 수 있습니다. 모든 계산은 브라우저에서 실행되며 서버로 전송되지 않습니다.",
-    navLabel: "↔",
+      "안구 추적 기록을 업로드하면 각 기록의 <strong>후반부</strong>(피로한 눈)만 사용하고, " +
+      "그 안에서 <strong>중심을 벗어난</strong> 샘플" +
+      "(눈 위치가 <strong>+2 초과</strong> 또는 <strong>−2 미만</strong>, ±2 중심 범위는 제외)만 " +
+      "남겨 각 그룹의 <strong>시간 대비 R²</strong>를 계산합니다. 모든 계산은 브라우저에서 " +
+      "실행되며 서버로 전송되지 않습니다.",
     infoSummary: "ℹ️ 사용 방법 / 필수 데이터 형식",
     step1:
       "파일은 이 템플릿의 열 형식과 일치해야 합니다: " +
@@ -95,20 +106,25 @@ const BASE_I18N = {
       "개별 <code>.csv</code> 파일 <strong>또는</strong> 이를 담은 " +
       "<code>.zip</code> 파일을 업로드하세요 (환자당 zip 하나가 편리합니다).",
     step4:
-      "환자 이름과 카테고리(수평/수직, 주파수, B/R)는 파일 이름에서 " +
-      "자동으로 읽습니다 — 원래 파일 이름을 유지하세요.",
+      "수평 카테고리는 <strong>LH/RH</strong>, 수직은 <strong>LV/RV</strong> 채널을 " +
+      "사용합니다. 환자 이름과 카테고리는 파일 이름에서 읽습니다.",
     warning:
-      "⚠️ 파일이 올바른 형식이 아니면 계산기가 작동하지 않습니다. " +
-      "<strong>LH</strong>와 <strong>RH</strong> 채널만 사용됩니다 (참조 시트와 동일).",
+      "⚠️ 파일이 올바른 형식이 아니면 계산기가 작동하지 않습니다. 눈이 해당 방향에 " +
+      "거의 도달하지 않으면 그룹은 비워집니다.",
     dropTitle:
       "<strong>드래그 앤 드롭</strong>으로 <code>.csv</code> 또는 " +
       "<code>.zip</code> 파일을 여기에 놓으세요",
     dropSub: "또는 클릭하여 파일 선택",
     downloadBtn: "⬇️ Excel 스프레드시트 다운로드",
     redNote: "🔴 빨간색 열은 <strong>R 유형</strong> 카테고리입니다.",
+    regionHeading: "중심 이탈 R² — 후반부만 (Above = 눈 > +2, Below = 눈 < −2, 시간 대비)",
     colPatient: "환자",
     colEye: "눈",
-    normHeading: "수직 0.75Hz(좌+우 합)로 나눈 값",
+    colRegion: "구간",
+    eyeLeft: "좌안",
+    eyeRight: "우안",
+    regionAbove: "+2 초과",
+    regionBelow: "−2 미만",
     dirHorizontal: "수평",
     dirVertical: "수직",
     statusProcessing: "처리 중…",
@@ -122,18 +138,9 @@ const BASE_I18N = {
   },
 };
 
-const I18N = {
-  en: { ...BASE_I18N.en, ...((APP.i18n && APP.i18n.en) || {}) },
-  ko: { ...BASE_I18N.ko, ...((APP.i18n && APP.i18n.ko) || {}) },
-};
-
 let currentLang = "en";
+const t = (key) => I18N[currentLang][key];
 
-function t(key) {
-  return I18N[currentLang][key];
-}
-
-/** Translate a category label ("Horizontal 0.5Hz B") for display. */
 function categoryLabelDisplay(label) {
   if (currentLang === "ko") {
     return label
@@ -142,27 +149,21 @@ function categoryLabelDisplay(label) {
   }
   return label;
 }
+const sideDisplay = (side) => (side === "Left" ? t("eyeLeft") : t("eyeRight"));
+const regionDisplay = (reg) => (reg === "Above" ? t("regionAbove") : t("regionBelow"));
 
 // ---------------------------------------------------------------------------
 // Filename / patient parsing
 // ---------------------------------------------------------------------------
 
-function baseName(name) {
-  return name.replace(/\\/g, "/").split("/").pop();
-}
-
-function stripSeparators(s) {
-  return s.replace(/^[\s_\-\t]+|[\s_\-\t]+$/g, "");
-}
-
-function stripDate(s) {
-  return s.replace(/^\d{4}[-.]\d{2}[-.]\d{2}\s+/, "").trim();
-}
+const baseName = (name) => name.replace(/\\/g, "/").split("/").pop();
+const stripSeparators = (s) => s.replace(/^[\s_\-\t]+|[\s_\-\t]+$/g, "");
+const stripDate = (s) => s.replace(/^\d{4}[-.]\d{2}[-.]\d{2}\s+/, "").trim();
 
 function patientFromFilename(file) {
   const base = file.replace(/\.(zip|csv)$/i, "");
   const m = base.match(/^(.*?)\s*MG[\s_]/i);
-  let head = m ? m[1] : base.split(/VOG/i)[0].replace(/MG\s*$/i, "");
+  const head = m ? m[1] : base.split(/VOG/i)[0].replace(/MG\s*$/i, "");
   return stripDate(stripSeparators(head)).trim();
 }
 
@@ -201,12 +202,11 @@ function parseCategory(name) {
 }
 
 // ---------------------------------------------------------------------------
-// CSV reading + per-file metric (R² or slope)
+// CSV reading + off-center R²
 // ---------------------------------------------------------------------------
 
 class InvalidCsvError extends Error {}
 
-/** Decode UTF-16LE bytes into {Time(sec):[], LH:[], RH:[], ...}. */
 function readChannels(bytes) {
   let text;
   try {
@@ -243,17 +243,19 @@ function readChannels(bytes) {
   return cols;
 }
 
-/** R² = squared Pearson correlation; NaN if <2 valid points or no variance. */
-function rSquared(x, y) {
+/** R² (squared Pearson corr) of x vs y over points where finite AND keep(x,y). */
+function rSquaredWhere(x, y, keep) {
   let n = 0, sx = 0, sy = 0;
   for (let i = 0; i < x.length; i++) {
-    if (Number.isFinite(x[i]) && Number.isFinite(y[i])) { n++; sx += x[i]; sy += y[i]; }
+    if (Number.isFinite(x[i]) && Number.isFinite(y[i]) && keep(x[i], y[i])) {
+      n++; sx += x[i]; sy += y[i];
+    }
   }
   if (n < 2) return NaN;
   const mx = sx / n, my = sy / n;
   let sxy = 0, sxx = 0, syy = 0;
   for (let i = 0; i < x.length; i++) {
-    if (Number.isFinite(x[i]) && Number.isFinite(y[i])) {
+    if (Number.isFinite(x[i]) && Number.isFinite(y[i]) && keep(x[i], y[i])) {
       const dx = x[i] - mx, dy = y[i] - my;
       sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
     }
@@ -263,43 +265,40 @@ function rSquared(x, y) {
   return r * r;
 }
 
-/** Slope m of the least-squares line y = m x + b. NaN if <2 pts or no x-variance. */
-function slope(x, y) {
-  let n = 0, sx = 0, sy = 0;
-  for (let i = 0; i < x.length; i++) {
-    if (Number.isFinite(x[i]) && Number.isFinite(y[i])) { n++; sx += x[i]; sy += y[i]; }
-  }
-  if (n < 2) return NaN;
-  const mx = sx / n, my = sy / n;
-  let sxy = 0, sxx = 0;
-  for (let i = 0; i < x.length; i++) {
-    if (Number.isFinite(x[i]) && Number.isFinite(y[i])) {
-      const dx = x[i] - mx;
-      sxy += dx * (y[i] - my); sxx += dx * dx;
+/** {above, below} R² for one channel: eye vs time over off-center samples,
+ *  using ONLY the second half of the recording (by time) — "tired eyes".
+ *  The first half is discarded before splitting into Above (+2) / Below (-2).
+ */
+function computeChannel(time, ch) {
+  let tmin = Infinity, tmax = -Infinity;
+  for (let i = 0; i < time.length; i++) {
+    if (Number.isFinite(time[i]) && Number.isFinite(ch[i])) {
+      if (time[i] < tmin) tmin = time[i];
+      if (time[i] > tmax) tmax = time[i];
     }
   }
-  if (sxx === 0) return NaN;
-  return sxy / sxx;
+  if (!Number.isFinite(tmin)) return { above: NaN, below: NaN };
+  const mid = (tmin + tmax) / 2; // keep only samples after the midpoint
+  return {
+    above: rSquaredWhere(time, ch, (tt, ee) => tt > mid && ee > CENTER),
+    below: rSquaredWhere(time, ch, (tt, ee) => tt > mid && ee < -CENTER),
+  };
 }
 
-function metricFn() {
-  return APP.metricId === "slope" ? slope : rSquared;
-}
-
-function computeFileMetric(bytes) {
+function computeFileMetric(bytes, direction) {
   const ch = readChannels(bytes);
   const time = ch["Time(sec)"];
-  const fn = metricFn();
-  const out = {};
-  for (const eye of EYES) out[eye] = fn(time, ch[eye]);
-  return out;
+  const map = channelsFor(direction);
+  return {
+    Left: computeChannel(time, ch[map.Left]),
+    Right: computeChannel(time, ch[map.Right]),
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Batch processing (csv + zip)
 // ---------------------------------------------------------------------------
 
-/** Best-effort decode of a zip entry name (UTF-8, else Korean cp949/euc-kr). */
 function decodeZipName(bytes) {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -312,24 +311,17 @@ function decodeZipName(bytes) {
   }
 }
 
-/* Warnings are stored as { fn, args } so they render in the active language. */
-function warn(list, fn, ...args) {
-  list.push({ fn, args });
-}
+const warn = (list, fn, ...args) => list.push({ fn, args });
 
-/** files: [{name, buffer(ArrayBuffer)}]. Returns {results, warnings}. */
 async function processUploads(files) {
   const results = [];
   const warnings = [];
 
   const handleCsv = (name, patientSource, u8) => {
     const category = parseCategory(name);
-    if (!category) {
-      warn(warnings, "warnBadDir", name);
-      return;
-    }
+    if (!category) { warn(warnings, "warnBadDir", name); return; }
     try {
-      const metric = computeFileMetric(u8);
+      const metric = computeFileMetric(u8, category.direction);
       results.push({
         patient: parsePatient(patientSource),
         category,
@@ -344,16 +336,12 @@ async function processUploads(files) {
   for (const f of files) {
     const lower = f.name.toLowerCase();
     if (lower.endsWith(".zip")) {
-      if (typeof JSZip === "undefined") {
-        warn(warnings, "warnBadZip", f.name);
-        continue;
-      }
+      if (typeof JSZip === "undefined") { warn(warnings, "warnBadZip", f.name); continue; }
       let zip;
       try {
         zip = await JSZip.loadAsync(f.buffer, { decodeFileName: decodeZipName });
       } catch (e) {
-        warn(warnings, "warnBadZip", f.name);
-        continue;
+        warn(warnings, "warnBadZip", f.name); continue;
       }
       const entries = Object.values(zip.files).filter(
         (e) => !e.dir && e.name.toLowerCase().endsWith(".csv")
@@ -396,74 +384,46 @@ function buildTable(results) {
   const columns = ordered.map((c) => c.label);
   const redColumns = ordered.filter((c) => c.type === "R").map((c) => c.label);
 
-  // Order patients by folder name (date-prefixed) -> matches explorer order.
   const keyOf = new Map();
   for (const r of results) if (!keyOf.has(r.patient)) keyOf.set(r.patient, r.sortKey || "");
   const patients = [...keyOf.keys()].sort((a, b) =>
     keyOf.get(a).localeCompare(keyOf.get(b), undefined, { numeric: true })
   );
 
-  const cells = new Map(); // key `${patient}||${eye}` -> {label: value}
+  const region = new Map(); // `${patient}||${side}||${region}` -> {label: R²}
+  const put = (key, label, v) => {
+    if (!region.has(key)) region.set(key, {});
+    region.get(key)[label] = v;
+  };
   for (const r of results) {
-    for (const eye of EYES) {
-      const key = `${r.patient}||${eye}`;
-      if (!cells.has(key)) cells.set(key, {});
-      cells.get(key)[r.category.label] = r.metric[eye];
+    for (const side of SIDES) {
+      const m = r.metric[side];
+      put(`${r.patient}||${side}||Above`, r.category.label, m.above);
+      put(`${r.patient}||${side}||Below`, r.category.label, m.below);
     }
   }
 
-  const rows = [];
+  const regionRows = [];
   for (const patient of patients) {
-    for (const eye of EYES) {
-      const values = cells.get(`${patient}||${eye}`) || {};
-      rows.push({ patient, eye, values });
-    }
-  }
-
-  // Normalized: each value / combined (LH+RH sum) Vertical 0.75Hz of the SAME
-  // type. Only used by the R² page (APP.showNormalized).
-  const typeOf = {};
-  for (const c of ordered) typeOf[c.label] = c.type;
-  const normalizedRows = [];
-  for (const patient of patients) {
-    const denom = {};
-    for (const type of ["B", "R"]) {
-      const dl = `Vertical 0.75Hz ${type}`;
-      const lh = (cells.get(`${patient}||LH`) || {})[dl];
-      const rh = (cells.get(`${patient}||RH`) || {})[dl];
-      const total = (Number.isFinite(lh) ? lh : NaN) + (Number.isFinite(rh) ? rh : NaN);
-      denom[type] = Number.isFinite(total) && total !== 0 ? total : NaN;
-    }
-    for (const eye of EYES) {
-      const src = cells.get(`${patient}||${eye}`) || {};
-      const values = {};
-      for (const label of columns) {
-        const v = src[label];
-        const d = denom[typeOf[label]];
-        values[label] = Number.isFinite(v) && Number.isFinite(d) ? v / d : NaN;
+    for (const side of SIDES) {
+      for (const reg of REGIONS) {
+        regionRows.push({
+          patient, side, region: reg,
+          values: region.get(`${patient}||${side}||${reg}`) || {},
+        });
       }
-      normalizedRows.push({ patient, eye, values });
     }
   }
 
-  return { columns, redColumns, patients, rows, normalizedRows };
+  return { columns, redColumns, patients, regionRows };
 }
 
 // ---------------------------------------------------------------------------
-// Number formatting (4 significant figures)
+// Formatting + Excel export
 // ---------------------------------------------------------------------------
 
-function fmt(v) {
-  return Number.isFinite(v) ? v.toPrecision(SIG_FIGS) : "";
-}
-
-function roundVal(v) {
-  return Number.isFinite(v) ? Number(v.toPrecision(SIG_FIGS)) : null;
-}
-
-// ---------------------------------------------------------------------------
-// Excel export (ExcelJS, styled)
-// ---------------------------------------------------------------------------
+const fmt = (v) => (Number.isFinite(v) ? v.toPrecision(SIG_FIGS) : "");
+const roundVal = (v) => (Number.isFinite(v) ? Number(v.toPrecision(SIG_FIGS)) : null);
 
 function styleHeaderCell(cell, name, redColumns) {
   const isRed = redColumns.includes(name);
@@ -474,35 +434,19 @@ function styleHeaderCell(cell, name, redColumns) {
 
 async function toExcelBlob(table) {
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet(APP.sheetName || "values");
-  const headers = ["Patient", "Eye", ...table.columns];
-
-  const headerRow = ws.addRow(headers);
-  headerRow.eachCell((cell, col) => styleHeaderCell(cell, headers[col - 1], table.redColumns));
-
-  const addDataRows = (dataRows) => {
-    for (const row of dataRows) {
-      const values = [row.patient, row.eye];
-      for (const label of table.columns) values.push(roundVal(row.values[label]));
-      const r = ws.addRow(values);
-      for (let i = 3; i <= headers.length; i++) r.getCell(i).numFmt = EXCEL_NUM_FMT;
-    }
-  };
-  addDataRows(table.rows);
-
-  if (APP.showNormalized) {
-    ws.addRow([]);
-    const titleRow = ws.addRow(["Divided by Vertical 0.75Hz (Left + Right sum)"]);
-    titleRow.getCell(1).font = { bold: true };
-    const normHeader = ws.addRow(headers);
-    normHeader.eachCell((cell, col) => styleHeaderCell(cell, headers[col - 1], table.redColumns));
-    addDataRows(table.normalizedRows);
+  const ws = wb.addWorksheet("Off-center R²");
+  const headers = ["Patient", "Eye", "Region", ...table.columns];
+  ws.addRow(headers).eachCell((cell, col) =>
+    styleHeaderCell(cell, headers[col - 1], table.redColumns)
+  );
+  for (const row of table.regionRows) {
+    const vals = [row.patient, row.side, row.region === "Above" ? "Above +2" : "Below -2"];
+    for (const label of table.columns) vals.push(roundVal(row.values[label]));
+    const r = ws.addRow(vals);
+    for (let i = 4; i <= headers.length; i++) r.getCell(i).numFmt = EXCEL_NUM_FMT;
   }
-
-  headers.forEach((name, i) => {
-    ws.getColumn(i + 1).width = Math.max(name.length, 10) + 2;
-  });
-  ws.views = [{ state: "frozen", xSplit: 2, ySplit: 1 }];
+  headers.forEach((n, i) => (ws.getColumn(i + 1).width = Math.max(n.length, 10) + 2));
+  ws.views = [{ state: "frozen", xSplit: 3, ySplit: 1 }];
 
   const buffer = await wb.xlsx.writeBuffer();
   return new Blob([buffer], {
@@ -519,39 +463,27 @@ let lastTable = null;
 let lastWarnings = [];
 let statusState = null;
 
-function eyeTableHtml(table, dataRows) {
-  const headers = [t("colPatient"), t("colEye"), ...table.columns.map(categoryLabelDisplay)];
+function renderRegionTable(table) {
+  if (!table) { els.regionResults.innerHTML = ""; els.regionHeading.style.display = "none"; return; }
+  els.regionHeading.style.display = "block";
+  const catHeaders = table.columns.map(categoryLabelDisplay);
   const redSet = new Set(table.redColumns.map(categoryLabelDisplay));
   let html = "<table><thead><tr>";
-  for (const h of headers) {
-    const red = redSet.has(h) ? ' class="red"' : "";
-    html += `<th${red}>${h}</th>`;
-  }
+  html += `<th>${t("colPatient")}</th><th>${t("colEye")}</th><th>${t("colRegion")}</th>`;
+  for (const h of catHeaders) html += `<th${redSet.has(h) ? ' class="red"' : ""}>${h}</th>`;
   html += "</tr></thead><tbody>";
-  for (const row of dataRows) {
-    html += `<tr><td class="patient">${row.patient}</td><td>${row.eye}</td>`;
+  let prevPatient = null;
+  for (const row of table.regionRows) {
+    const cls = row.patient !== prevPatient && prevPatient !== null ? ' class="group-top"' : "";
+    prevPatient = row.patient;
+    html += `<tr${cls}><td class="patient">${row.patient}</td><td>${sideDisplay(row.side)}</td><td>${regionDisplay(row.region)}</td>`;
     for (const label of table.columns) {
       const red = table.redColumns.includes(label) ? ' class="red"' : "";
       html += `<td${red}>${fmt(row.values[label])}</td>`;
     }
     html += "</tr>";
   }
-  return html + "</tbody></table>";
-}
-
-function renderTable(table) {
-  els.results.innerHTML = table ? eyeTableHtml(table, table.rows) : "";
-}
-
-function renderNormalizedTable(table) {
-  if (!els.normResults) return; // page has no normalized section
-  if (!APP.showNormalized || !table || !table.normalizedRows.length) {
-    els.normResults.innerHTML = "";
-    if (els.normHeading) els.normHeading.style.display = "none";
-    return;
-  }
-  els.normHeading.style.display = "block";
-  els.normResults.innerHTML = eyeTableHtml(table, table.normalizedRows);
+  els.regionResults.innerHTML = html + "</tbody></table>";
 }
 
 function renderWarnings(warnings) {
@@ -571,10 +503,7 @@ function renderStatus() {
     els.status.innerHTML = `<span class="error">${t("statusNoValid")}</span>`;
 }
 
-function setStatus(state) {
-  statusState = state;
-  renderStatus();
-}
+const setStatus = (state) => { statusState = state; renderStatus(); };
 
 async function handleFiles(fileList) {
   const files = [];
@@ -586,18 +515,15 @@ async function handleFiles(fileList) {
   if (results.length === 0) {
     setStatus({ type: "noValid" });
     lastTable = null;
-    renderTable(null);
-    renderNormalizedTable(null);
+    renderRegionTable(null);
     els.download.disabled = true;
     els.redNote.style.display = "none";
     return;
   }
-
   const table = buildTable(results);
   lastTable = table;
   setStatus({ type: "processed", n: results.length, p: table.patients.length });
-  renderTable(table);
-  renderNormalizedTable(table);
+  renderRegionTable(table);
   els.download.disabled = false;
   els.redNote.style.display = table.redColumns.length ? "block" : "none";
 }
@@ -614,70 +540,46 @@ async function downloadExcel() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `${APP.fileStem || "values"}_${stamp()}.xlsx`;
+  a.download = `Eye_offcenter_R2_${stamp()}.xlsx`;
   a.click();
   URL.revokeObjectURL(url);
 }
 
-// ---- Language handling ----
-
 function applyTranslations() {
   document.documentElement.lang = currentLang;
-  document.querySelectorAll("[data-i18n]").forEach((el) => {
-    el.textContent = t(el.dataset.i18n);
-  });
-  document.querySelectorAll("[data-i18n-html]").forEach((el) => {
-    el.innerHTML = t(el.dataset.i18nHtml);
-  });
+  document.querySelectorAll("[data-i18n]").forEach((el) => (el.textContent = t(el.dataset.i18n)));
+  document.querySelectorAll("[data-i18n-html]").forEach((el) => (el.innerHTML = t(el.dataset.i18nHtml)));
   const link = document.getElementById("templateLink");
   if (link) link.href = TEMPLATE_URL;
   els.langToggle.textContent = t("langButton");
-
   renderStatus();
   renderWarnings(lastWarnings);
-  renderTable(lastTable);
-  renderNormalizedTable(lastTable);
+  renderRegionTable(lastTable);
 }
 
-function setLang(lang) {
-  currentLang = lang;
-  applyTranslations();
-}
+const setLang = (lang) => { currentLang = lang; applyTranslations(); };
 
 window.addEventListener("DOMContentLoaded", () => {
   els.input = document.getElementById("fileInput");
   els.drop = document.getElementById("dropZone");
-  els.results = document.getElementById("results");
+  els.regionResults = document.getElementById("regionResults");
+  els.regionHeading = document.getElementById("regionHeading");
   els.warnings = document.getElementById("warnings");
   els.status = document.getElementById("status");
   els.download = document.getElementById("downloadBtn");
   els.redNote = document.getElementById("redNote");
-  els.normHeading = document.getElementById("normHeading");
-  els.normResults = document.getElementById("normResults");
   els.langToggle = document.getElementById("langToggle");
-  els.navLink = document.getElementById("navLink");
 
-  if (els.navLink && APP.otherHref) els.navLink.href = APP.otherHref;
   applyTranslations();
 
-  els.langToggle.addEventListener("click", () =>
-    setLang(currentLang === "en" ? "ko" : "en")
-  );
+  els.langToggle.addEventListener("click", () => setLang(currentLang === "en" ? "ko" : "en"));
   els.input.addEventListener("change", (e) => handleFiles(e.target.files));
   els.download.addEventListener("click", downloadExcel);
 
   ["dragenter", "dragover"].forEach((ev) =>
-    els.drop.addEventListener(ev, (e) => {
-      e.preventDefault();
-      els.drop.classList.add("hover");
-    })
-  );
+    els.drop.addEventListener(ev, (e) => { e.preventDefault(); els.drop.classList.add("hover"); }));
   ["dragleave", "drop"].forEach((ev) =>
-    els.drop.addEventListener(ev, (e) => {
-      e.preventDefault();
-      els.drop.classList.remove("hover");
-    })
-  );
+    els.drop.addEventListener(ev, (e) => { e.preventDefault(); els.drop.classList.remove("hover"); }));
   els.drop.addEventListener("drop", (e) => {
     if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
   });
